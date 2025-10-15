@@ -32,7 +32,7 @@ PRIMARY_BIN="$BIN_DIR/$YS_CMD"
 REPO_OWNER="SirYuxuan"
 REPO_NAME="YuxuanShell"
 REPO_BRANCH="${YS_BRANCH:-main}"
-TARBALL_URL="https://codeload.github.com/$REPO_OWNER/$REPO_NAME/tar.gz/refs/heads/$REPO_BRANCH"
+RAW_BASE="https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/$REPO_BRANCH"
 
 if [[ "$(id -u)" -ne 0 ]]; then
     SUDO="sudo"
@@ -89,22 +89,25 @@ guess_local_root() {
     fi
 }
 
-# 下载仓库源码到临时目录，并输出源码根目录路径
-download_source() {
+# 逐个下载必要文件到 APP_DIR（在非本地安装时）
+download_files() {
     check_dependencies
-    TMP_DIR="$(mktemp -d)"
-    trap '[[ -n "$TMP_DIR" ]] && rm -rf "$TMP_DIR" || true' EXIT
-    log_step "下载源码：$TARBALL_URL"
-    # 将下载与解压的进度输出到 stderr，避免污染 stdout
-    curl -fsSL "$TARBALL_URL" | tar -xzf - -C "$TMP_DIR" 1>&2
-    local extracted
-    extracted="$(find "$TMP_DIR" -maxdepth 1 -type d -name "$REPO_NAME-*" | head -n 1 || true)"
-    if [[ -z "$extracted" ]]; then
-        log_error "解压失败：未找到源码目录"
-        exit 1
-    fi
-    # 仅将路径输出到 stdout
-    echo "$extracted"
+    log_step "在线下载必要文件（分支：$REPO_BRANCH）"
+    local files=(
+        "src/main.sh"
+        "src/config/settings.sh"
+        "src/modules/utils.sh"
+        "src/modules/system.sh"
+        "src/modules/network.sh"
+    )
+    for rel in "${files[@]}"; do
+        local url="$RAW_BASE/$rel"
+        local dest="$APP_DIR/${rel#src/}"
+        $SUDO mkdir -p "$(dirname "$dest")"
+        log_info "下载: $url -> $dest"
+        curl -fsSL "$url" | $SUDO tee "$dest" >/dev/null
+    done
+    $SUDO chmod +x "$APP_DIR/main.sh" || true
 }
 
 # 创建目录（需要 root）
@@ -127,7 +130,7 @@ copy_source() {
     $SUDO chmod +x "$APP_DIR/main.sh" || true
 }
 
-# 创建命令（主命令 + 兼容命令）
+# 创建命令（创建启动器脚本，避免软链导致的 BASH_SOURCE 解析问题）
 create_command() {
     local target_bin="$1" # 如 /usr/local/bin/easy
     local overwrite="$2"  # 1/0
@@ -135,17 +138,11 @@ create_command() {
         log_warn "已存在: $target_bin（跳过，设置 YS_FORCE=1 可覆盖）"
         return 0
     fi
-    # 优先尝试符号链接
-    if $SUDO ln -sf "$APP_DIR/main.sh" "$target_bin" 2>/dev/null; then
-        :
-    else
-        # 回退为启动器脚本
-        local tmp_launcher
-        tmp_launcher="$(mktemp)"
-        printf '#!/usr/bin/env bash\nexec "%s/main.sh" "$@"\n' "$APP_DIR" > "$tmp_launcher"
-        $SUDO install -m 0755 "$tmp_launcher" "$target_bin"
-        rm -f "$tmp_launcher"
-    fi
+    local tmp_launcher
+    tmp_launcher="$(mktemp)"
+    printf '#!/usr/bin/env bash\nexec "%s/main.sh" "$@"\n' "$APP_DIR" > "$tmp_launcher"
+    $SUDO install -m 0755 "$tmp_launcher" "$target_bin"
+    rm -f "$tmp_launcher"
     log_info "已安装命令: $target_bin -> $APP_DIR/main.sh"
 }
 
@@ -163,11 +160,13 @@ install_main() {
     if [[ -n "$root" ]]; then
         log_step "使用本地源码: $root"
     else
-        root="$(download_source)"
-        log_step "使用下载源码: $root"
+        log_step "在线模式：逐个下载文件"
+        download_files
     fi
 
-    copy_source "$root"
+    if [[ -n "$root" ]]; then
+        copy_source "$root"
+    fi
     create_command "$PRIMARY_BIN" "$YS_FORCE"
 
     # 兼容命令
