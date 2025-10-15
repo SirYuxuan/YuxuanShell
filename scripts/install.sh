@@ -43,10 +43,10 @@ fi
 TMP_DIR=""
 
 # --------------------------- 日志函数 -----------------------------------------
-log_info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_info()  { echo -e "${GREEN}[INFO]${NC} $*" >&2; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
-log_step()  { echo -e "${BLUE}==>${NC} $*"; }
+log_step()  { echo -e "${BLUE}==>${NC} $*" >&2; }
 
 # --------------------------- 实用函数 -----------------------------------------
 check_dependencies() {
@@ -95,13 +95,15 @@ download_source() {
     TMP_DIR="$(mktemp -d)"
     trap '[[ -n "$TMP_DIR" ]] && rm -rf "$TMP_DIR" || true' EXIT
     log_step "下载源码：$TARBALL_URL"
-    curl -fsSL "$TARBALL_URL" | tar -xzf - -C "$TMP_DIR"
+    # 将下载与解压的进度输出到 stderr，避免污染 stdout
+    curl -fsSL "$TARBALL_URL" | tar -xzf - -C "$TMP_DIR" 1>&2
     local extracted
     extracted="$(find "$TMP_DIR" -maxdepth 1 -type d -name "$REPO_NAME-*" | head -n 1 || true)"
     if [[ -z "$extracted" ]]; then
         log_error "解压失败：未找到源码目录"
         exit 1
     fi
+    # 仅将路径输出到 stdout
     echo "$extracted"
 }
 
@@ -110,17 +112,19 @@ ensure_dirs() {
     $SUDO mkdir -p "$APP_DIR" "$BIN_DIR"
 }
 
-# 复制源码到 APP_DIR
+# 复制源码到 APP_DIR（默认使用 cp；如设置 YS_USE_RSYNC=1 且 rsync 可用，则使用 rsync）
 copy_source() {
     local src_root="$1"
-    if command -v rsync >/dev/null 2>&1; then
-        $SUDO rsync -a --delete "$src_root/src/" "$APP_DIR/"
+    log_info "复制源码: src_root='$src_root' -> APP_DIR='$APP_DIR'"
+    if [[ "${YS_USE_RSYNC:-0}" == "1" ]] && command -v rsync >/dev/null 2>&1; then
+        $SUDO rsync -a --delete -- "$src_root/src/" "$APP_DIR/"
     else
         $SUDO rm -rf "$APP_DIR"/* 2>/dev/null || true
         $SUDO mkdir -p "$APP_DIR"
-        $SUDO cp -R "$src_root/src/"* "$APP_DIR/"
+        # 使用 tar 管道复制以更好地保留权限（兼容空目录）
+        (cd "$src_root/src" && tar -cf - .) | $SUDO tar -xf - -C "$APP_DIR"
     fi
-    $SUDO chmod +x "$APP_DIR/main.sh"
+    $SUDO chmod +x "$APP_DIR/main.sh" || true
 }
 
 # 创建命令（主命令 + 兼容命令）
